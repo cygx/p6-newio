@@ -1,10 +1,9 @@
-no precompilation;
 use nqp;
 
 my constant Path = IO::Path;
 
-my role Encoding { ... }
-my role Encoding::Decoder { ... }
+my role Encoding {}
+my role Encoding::Decoder {}
 
 my role IO { ... }
 
@@ -51,7 +50,6 @@ my role IO::CodedStream does IO::Stream {
 
     method readall(--> blob8:D) {
         my \decoder = self.decoder;
-        decoder.restore-bytes;
         decoder.add-bytes(self.source.readall);
         decoder.consume-all-bytes;
     }
@@ -69,7 +67,9 @@ my role IO::CodedStream does IO::Stream {
     }
 }
 
-my class IO::VMHandle is repr<MVMOSHandle> does IO::Stream {
+my class IO::VMHandle does IO::Stream {
+    has $!fh;
+
     sub mode(
         :$r, :$w, :$x, :$a, :$update,
         :$rw, :$rx, :$ra,
@@ -111,40 +111,47 @@ my class IO::VMHandle is repr<MVMOSHandle> does IO::Stream {
         $mode;
     }
 
-    method new { !!! }
+    method new(Mu \fh --> IO::VMHandle:D) {
+        nqp::create(self)!SET-FH(nqp::decont(fh));
+    }
 
-    method bless(Mu \handle --> IO::VMHandle:D) {
-        nqp::rebless(handle, self);
+    method perl(--> Str:D) {
+        'IO::VMHandle.new(...)';
+    }
+
+    method !SET-FH(Mu \fh) {
+        $!fh := fh;
+        self;
     }
 
     method open-file(Str:D \path --> IO::VMHandle:D) {
-        self.bless(nqp::open(path, mode(|%_)));
+        self.new(nqp::open(path, mode(|%_)));
     }
 
-    method stdin(--> IO::VMHandle:D) { self.bless(nqp::getstdin()) }
-    method stdout(--> IO::VMHandle:D) { self.bless(nqp::getstdout()) }
-    method stderr(--> IO::VMHandle:D) { self.bless(nqp::getstderr()) }
+    method stdin(--> IO::VMHandle:D) { self.new(nqp::getstdin()) }
+    method stdout(--> IO::VMHandle:D) { self.new(nqp::getstdout()) }
+    method stderr(--> IO::VMHandle:D) { self.new(nqp::getstderr()) }
 
     method fd(--> int) {
-        nqp::filenofh(self);
+        nqp::filenofh($!fh);
     }
 
     method close(--> True) {
-        nqp::closefh(self);
+        nqp::closefh($!fh);
     }
 
     method read(Int:D \n --> blob8:D) {
-        nqp::readfh(self, buf8.new, nqp::unbox_i(n)) || Nil;
+        nqp::readfh($!fh, buf8.new, nqp::unbox_i(n)) || Nil;
     }
 
     method readall(--> blob8:D) {
         my \buf = buf8.new;
-        loop { buf.append(nqp::readfh(self, buf8.new, 0x100000) || last) }
+        loop { buf.append(nqp::readfh($!fh, buf8.new, 0x100000) || last) }
         buf;
     }
 
     method write(blob8:D \buf --> True) {
-        nqp::writefh(self, buf);
+        nqp::writefh($!fh, buf);
     }
 }
 
@@ -152,6 +159,15 @@ my class IO::Handle does IO::CodedStream {
     has $.source;
     has $.encoding;
     has $.decoder;
+
+    submethod BUILD(:$!source, :$enc) {
+        given $enc {
+            when Encoding {
+                $!encoding = $enc;
+                $!decoder = $!encoding.decoder;
+            }
+        }
+    }
 }
 
 my role IO {
@@ -236,7 +252,7 @@ my role IO {
 
 my class IO::FileHandle is IO::Handle {
     has $.path;
-    submethod BUILD(:$io) { $!path = $io.abspath }
+    submethod BUILD(:$io) { $!path = Path.new-from-absolute-path($io.abspath) }
 }
 
 my role IO::FileIO does IO {
@@ -251,4 +267,9 @@ my role IO::FileIO does IO {
 
 my class IO::Path is Path does IO::FileIO {}
 
-sub EXPORT { BEGIN Map.new((IO => IO)) }
+sub EXPORT {
+    BEGIN Map.new((
+        IO => IO,
+        Encoding => Encoding,
+    ));
+}

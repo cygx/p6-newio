@@ -28,7 +28,7 @@ my role Encoding[Int:D \UNIT-BITS] {
 }
 
 my role Encoding::Decoder::Generic8[Encoding \ENC] does Encoding::Decoder {
-    has @.bytes = buf8.new;
+    has $.bytes = buf8.new;
     has @.separators;
 
     method encoding { ENC }
@@ -37,6 +37,10 @@ my role Encoding::Decoder::Generic8[Encoding \ENC] does Encoding::Decoder {
         my \decoder = self.bless;
         decoder.set-line-separators($sep.list);
         decoder;
+    }
+
+    method reset(--> Nil) {
+        $!bytes = buf8.new;
     }
 
     method set-line-separators(@seps --> Nil) {
@@ -60,14 +64,51 @@ my role Encoding::Decoder::Generic8[Encoding \ENC] does Encoding::Decoder {
             default { die "cannot use {.perl} as separator" }
         }
     }
+
+    method add-bytes(blob8:D $bytes --> Nil) {
+        $!bytes.append($bytes);
+    }
+
+    method consume-all-bytes(--> blob8:D) {
+        LEAVE self.reset;
+        $!bytes;
+    }
 }
 
 my role Encoding::Decoder::Generic16[$] does Encoding::Decoder {}
 my role Encoding::Decoder::Generic32[$] does Encoding::Decoder {}
 
 my class Encoding::UTF8 does Encoding[8] {
-    method encode-codes(Uni:D $to-encode --> blob8:D) {
-        !!!
+    method encode-codes(Uni:D \uni --> blob8:D) {
+        my \buf = buf8.allocate(uni.elems * 4);
+        my int $i = 0;
+        for uni {
+            when $_ <= 0x7F {
+                nqp::bindpos_i(buf, $i++, $_);
+            }
+
+            when $_ <= 0x7FF {
+                nqp::bindpos_i(buf, $i++, 0xC0 +| ($_ +> 6));
+                nqp::bindpos_i(buf, $i++, 0x80 +| ($_ +& 0x3F));
+            }
+
+            when $_ <= 0xFFFF {
+                nqp::bindpos_i(buf, $i++, 0xE0 +|  ($_ +> 12));
+                nqp::bindpos_i(buf, $i++, 0x80 +| (($_ +>  6) +& 0x3F));
+                nqp::bindpos_i(buf, $i++, 0x80 +| ( $_        +& 0x3F));
+            }
+
+            when $_ <= 0x1FFFFF {
+                nqp::bindpos_i(buf, $i++, 0xF0 +|  ($_ +> 18));
+                nqp::bindpos_i(buf, $i++, 0x80 +| (($_ +> 12) +& 0x3F));
+                nqp::bindpos_i(buf, $i++, 0x80 +| (($_ +>  6) +& 0x3F));
+                nqp::bindpos_i(buf, $i++, 0x80 +| ( $_        +& 0x3F));
+            }
+
+            default { !!! }
+        }
+
+        buf.reallocate($i);
     }
 }
 

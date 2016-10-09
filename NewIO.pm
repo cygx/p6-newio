@@ -1,3 +1,4 @@
+no precompilation;
 use Encoding;
 use nqp;
 

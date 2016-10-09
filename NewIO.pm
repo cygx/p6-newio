@@ -1,9 +1,7 @@
+use Encoding;
 use nqp;
 
 my constant Path = IO::Path;
-
-my role Encoding {}
-my role Encoding::Decoder {}
 
 my role IO { ... }
 
@@ -39,7 +37,7 @@ my role IO::Stream {
 }
 
 my role IO::CodedStream does IO::Stream {
-    method encoding(--> Encoding:D) { ... }
+    method encoding(--> Encoding:U) { ... }
     method decoder(--> Encoding::Decoder:D) { ... }
     method source(--> IO::Stream:D) { ... }
 
@@ -63,7 +61,7 @@ my role IO::CodedStream does IO::Stream {
     method readallchars(--> Str:D) {
         my \decoder = self.decoder;
         decoder.add-bytes(self.source.readall);
-        decoder.consume-all-chars;
+        decoder.consume-all-graphs;
     }
 }
 
@@ -160,13 +158,15 @@ my class IO::Handle does IO::CodedStream {
     has $.encoding;
     has $.decoder;
 
-    submethod BUILD(:$!source, :$enc) {
-        given $enc {
-            when Encoding {
-                $!encoding = $enc;
-                $!decoder = $!encoding.decoder;
-            }
+    submethod BUILD(:$!source, :$enc = Encoding::UTF8) {
+        $!encoding = do given $enc {
+            when Encoding { $enc }
+            when 'utf8' { Encoding::UTF8 }
+            when Str { die "unknown encoding '$_'" }
+            default { die "invalid encoding argument {$enc.perl}" }
         }
+
+        $!decoder = $!encoding.decoder(|%_);
     }
 }
 
@@ -267,9 +267,4 @@ my role IO::FileIO does IO {
 
 my class IO::Path is Path does IO::FileIO {}
 
-sub EXPORT {
-    BEGIN Map.new((
-        IO => IO,
-        Encoding => Encoding,
-    ));
-}
+sub EXPORT { BEGIN Map.new((IO => IO)) }

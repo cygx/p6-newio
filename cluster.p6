@@ -27,7 +27,7 @@ my constant TABLE = do {
 }
 
 our sub get-property(uint32 \code) {
-    Property::{nqp::getuniprop_str(code, nqp::unipropcode('gcb'))};
+    Property::{nqp::getuniprop_str(code, BEGIN nqp::unipropcode('gcb'))};
 }
 
 our sub is-break(uint32 \a, uint32 \b) {

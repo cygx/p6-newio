@@ -1,5 +1,7 @@
-unit module Unicode::GCB;
+no precompilation;
 use nqp;
+
+unit module GCB;
 
 enum Property <
     Other
@@ -67,5 +69,3 @@ our sub clusters(Uni \uni) {
         take Uni.new(uni[$i..^$j]);
     }
 }
-
-say clusters Uni.new(0x06DD, 0x1F1FF xx 5, 0x0300, 0x0d, 0x0a);

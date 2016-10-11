@@ -14,8 +14,8 @@
     In addition, there are compatibility modes for 8-, 16- and 32-bit encodings.
     As synthetic units are 32-bit, the first unit is a header that determines
     the number of padding bytes at the end of the last unit.
-    The compatibility sequence starts at the least significant byte of
-    the second unit and continues in natural byte order.
+    The compatibility sequence starts at the first byte of the second unit and
+    continues in natural byte order.
 */
 
 #define SYNTH32_REGULAR  (0u)

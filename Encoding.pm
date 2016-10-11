@@ -9,6 +9,140 @@ sub has-unique-decomposition($_) {
 
 my role Encoding { ... }
 
+my class Encoding::Buf does Positional[uint32]
+    is repr<VMArray> is array_type(uint32) {
+
+    enum (
+        REGULAR  => 0,
+        DENORMAL => 0x8 +< 28,
+        COMPAT8  => 0x9 +< 28,
+        COMPAT16 => 0xA +< 28,
+        COMPAT32 => 0xB +< 28,
+    );
+
+    method new {
+        nqp::create(self);
+    }
+
+    multi method Bool(::?CLASS:D:) {
+        nqp::p6bool(nqp::elems(self));
+    }
+
+    method elems {
+        nqp::elems(self);
+    }
+
+    sub hex($_) { .fmt('%08X') }
+
+    multi method gist(::?CLASS:D:) {
+        sprintf '%s:0x<%s>', self.^name, join ' ', self.map: -> \value {
+            given value +& 0xF0000000 {
+                when DENORMAL { "[d] {hex value +& 0x0FFFFFFF}" }
+                when COMPAT8  { "[c8:{value +& 0x0FFFFFFF}]" }
+                when COMPAT16 { "[c16:{value +& 0x0FFFFFFF}]" }
+                when COMPAT32 { "[c32:{value +& 0x0FFFFFFF}]" }
+                default       { hex value }
+            }
+        }
+    }
+
+    method list {
+        gather {
+            my \N = nqp::elems(self);
+            loop (my int $i = 0; $i < N; $i = $i + 1) {
+                take nqp::atpos_i(self, $i);
+            }
+        }
+    }
+
+    proto method add($) {*}
+    multi method add(Int:D \value --> Nil) {
+        self[nqp::elems(self)] = value;
+    }
+    multi method add(Encoding::Buf:D \blob --> Nil) {
+        nqp::splice(self, blob, nqp::elems(self), 0);
+    }
+    multi method add(Str:D \blob --> Nil) {
+        nqp::splice(self, blob.NFC, nqp::elems(self), 0);
+    }
+    multi method add(Uni:D \blob --> Nil) {
+        nqp::splice(self, blob, nqp::elems(self), 0);
+    }
+    multi method add(blob8:D \blob --> Nil) {
+        my \elems = nqp::elems(self);
+        my \bytes = blob.elems;
+        nqp::setelems(self, elems + (bytes + 3) div 4);
+        self[elems] = COMPAT8 +| bytes;
+
+        my int $i = 0;
+        my int $j = elems + 1;
+        my \N = (bytes div 4) * 4;
+        while $i < N {
+            self[$j] = blob[$i]
+                    +| blob[$i+1] +< 8
+                    +| blob[$i+2] +< 16
+                    +| blob[$i+3] +< 24;
+            $i = $i + 4;
+            $j = $j + 1;
+        }
+
+        given bytes - $i {
+            when 1 { self[$j] = blob[$i] }
+            when 2 { self[$j] = blob[$i] +| blob[$i+1] +< 8 }
+            when 3 {
+                self[$j] = blob[$i]
+                        +| blob[$i+1] +< 8
+                        +| blob[$i+2] +< 16;
+            }
+        }
+    }
+    multi method add(blob16:D \blob --> Nil) {
+        my \elems = nqp::elems(self);
+        my \words = blob.elems;
+        nqp::setelems(self, elems + (words + 1) div 2);
+        self[elems] = COMPAT16 +| words * 2;
+
+        my int $i = 0;
+        my int $j = elems + 1;
+        my \N = (words div 2) * 2;
+        while $i < N {
+            self[$j] = blob[$i] +| blob[$i+1] +< 16;
+            $i = $i + 2;
+            $j = $j + 1;
+        }
+
+        self[$j] = blob[$i] if $i < words;
+    }
+    multi method add(blob32:D \blob --> Nil) {
+        nqp::push_i(self, COMPAT8 +| blob.elems * 4);
+        nqp::splice(self, blob, nqp::elems(self), 0);
+    }
+
+    multi method EXISTS-POS(int \pos) {
+        nqp::p6bool(nqp::islt_i(pos, nqp::elems(self)) && nqp::isge_i(pos, 0));
+    }
+    multi method EXISTS-POS(Int:D \pos) {
+        pos < nqp::elems(self) && pos >= 0;
+    }
+
+    proto method ASSIGN-POS($, $) {*}
+    multi method ASSIGN-POS(int \pos, int \value) {
+        nqp::bindpos_i(self, pos, value);
+    }
+    multi method ASSIGN-POS(Int:D \pos, Int:D \value) {
+        nqp::bindpos_i(self, nqp::unbox_i(pos), nqp::unbox_i(value));
+    }
+
+    proto method AT-POS($) {*}
+    multi method AT-POS(int \pos) {
+        nqp::atpos_i(self, pos);
+    }
+    multi method AT-POS(Int:D \pos) {
+        my int $pos = nqp::unbox_i(pos);
+        nqp::atpos_i(self, $pos);
+    }
+}
+
 my role Encoding::Decoder {}
 
 my role Encoding::Decoder::Generic8[$] { ... }

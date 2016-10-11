@@ -29,7 +29,7 @@ static inline uint32_t synth32_type(const uint32_t *codes) {
 }
 
 static inline uint32_t synth32_is_type(const uint32_t *codes, uint32_t type) {
-    return *codes & type;
+    return synth32_type(codes) == type;
 }
 
 static inline uint32_t synth32_first(const uint32_t *codes) {

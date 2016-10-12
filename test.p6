@@ -1,4 +1,3 @@
-no precompilation;
 use lib '.';
 use Encoding;
 

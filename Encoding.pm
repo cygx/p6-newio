@@ -1,4 +1,3 @@
-no precompilation;
 use nqp;
 
 sub has-unique-decomposition($_) {

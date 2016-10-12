@@ -1,4 +1,3 @@
-no precompilation;
 use nqp;
 
 unit module GCB;

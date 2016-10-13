@@ -1,279 +1,219 @@
+use GCB;
 use nqp;
-
-sub has-unique-decomposition($_) {
-    .NFC == .NFD && [==] .NFC.map: {
-        nqp::getuniprop_int($_, BEGIN nqp::unipropcode('ccc'));
-    }
-}
 
 my role Encoding { ... }
 
-my class Encoding::Buf does Positional[uint32]
-    is repr<VMArray> is array_type(uint32) {
+my class Encoding::Registry {
+    my %encodings is default(Nil);
 
-    enum (
-        REGULAR  => 0,
-        DENORMAL => 0x8 +< 28,
-        COMPAT8  => 0x9 +< 28,
-        COMPAT16 => 0xA +< 28,
-        COMPAT32 => 0xB +< 28,
-    );
-
-    method new {
-        nqp::create(self);
+    method add(Encoding \enc, *@aliases --> Nil) {
+        %encodings{map &lc, enc.name, @aliases} = enc xx *;
     }
 
-    multi method Bool(::?CLASS:D:) {
-        nqp::p6bool(nqp::elems(self));
-    }
-
-    method elems {
-        nqp::elems(self);
-    }
-
-    sub hex($_) { .fmt('%08X') }
-
-    multi method gist(::?CLASS:D:) {
-        sprintf '%s:0x<%s>', self.^name, join ' ', self.map: -> \value {
-            given value +& 0xF0000000 {
-                when DENORMAL { "[d] {hex value +& 0x0FFFFFFF}" }
-                when COMPAT8  { "[c8:{value +& 0x0FFFFFFF}]" }
-                when COMPAT16 { "[c16:{value +& 0x0FFFFFFF}]" }
-                when COMPAT32 { "[c32:{value +& 0x0FFFFFFF}]" }
-                default       { hex value }
-            }
-        }
-    }
-
-    method list {
-        gather {
-            my \N = nqp::elems(self);
-            loop (my int $i = 0; $i < N; $i = $i + 1) {
-                take nqp::atpos_i(self, $i);
-            }
-        }
-    }
-
-    proto method add($) {*}
-    multi method add(Int:D \value --> Nil) {
-        self[nqp::elems(self)] = value;
-    }
-    multi method add(Encoding::Buf:D \blob --> Nil) {
-        nqp::splice(self, blob, nqp::elems(self), 0);
-    }
-    multi method add(Str:D \blob --> Nil) {
-        nqp::splice(self, blob.NFC, nqp::elems(self), 0);
-    }
-    multi method add(Uni:D \blob --> Nil) {
-        nqp::splice(self, blob, nqp::elems(self), 0);
-    }
-    multi method add(blob8:D \blob --> Nil) {
-        my \elems = nqp::elems(self);
-        my \bytes = blob.elems;
-        nqp::setelems(self, elems + (bytes + 3) div 4);
-        self[elems] = COMPAT8 +| bytes;
-
-        my int $i = 0;
-        my int $j = elems + 1;
-        my \N = (bytes div 4) * 4;
-        while $i < N {
-            self[$j] = blob[$i]
-                    +| blob[$i+1] +< 8
-                    +| blob[$i+2] +< 16
-                    +| blob[$i+3] +< 24;
-            $i = $i + 4;
-            $j = $j + 1;
-        }
-
-        given bytes - $i {
-            when 1 { self[$j] = blob[$i] }
-            when 2 { self[$j] = blob[$i] +| blob[$i+1] +< 8 }
-            when 3 {
-                self[$j] = blob[$i]
-                        +| blob[$i+1] +< 8
-                        +| blob[$i+2] +< 16;
-            }
-        }
-    }
-    multi method add(blob16:D \blob --> Nil) {
-        my \elems = nqp::elems(self);
-        my \words = blob.elems;
-        nqp::setelems(self, elems + (words + 1) div 2);
-        self[elems] = COMPAT16 +| words * 2;
-
-        my int $i = 0;
-        my int $j = elems + 1;
-        my \N = (words div 2) * 2;
-        while $i < N {
-            self[$j] = blob[$i] +| blob[$i+1] +< 16;
-            $i = $i + 2;
-            $j = $j + 1;
-        }
-
-        self[$j] = blob[$i] if $i < words;
-    }
-    multi method add(blob32:D \blob --> Nil) {
-        nqp::push_i(self, COMPAT8 +| blob.elems * 4);
-        nqp::splice(self, blob, nqp::elems(self), 0);
-    }
-
-    multi method EXISTS-POS(int \pos) {
-        nqp::p6bool(nqp::islt_i(pos, nqp::elems(self)) && nqp::isge_i(pos, 0));
-    }
-    multi method EXISTS-POS(Int:D \pos) {
-        pos < nqp::elems(self) && pos >= 0;
-    }
-
-    proto method ASSIGN-POS($, $) {*}
-    multi method ASSIGN-POS(int \pos, int \value) {
-        nqp::bindpos_i(self, pos, value);
-    }
-    multi method ASSIGN-POS(Int:D \pos, Int:D \value) {
-        nqp::bindpos_i(self, nqp::unbox_i(pos), nqp::unbox_i(value));
-    }
-
-    proto method AT-POS($) {*}
-    multi method AT-POS(int \pos) {
-        nqp::atpos_i(self, pos);
-    }
-    multi method AT-POS(Int:D \pos) {
-        my int $pos = nqp::unbox_i(pos);
-        nqp::atpos_i(self, $pos);
+    method get(Str \name) {
+        %encodings{name};
     }
 }
 
+my role Encoding::Encoder {}
 my role Encoding::Decoder {}
 
-my role Encoding::Decoder::Generic8[$] { ... }
-my role Encoding::Decoder::Generic16[$] { ... }
-my role Encoding::Decoder::Generic32[$] { ... }
+my role Encoding::Decoder::Strict[\ENC] { ... }
+my role Encoding::Decoder::Warn[\ENC] { ... }
+my role Encoding::Decoder::Lax[\ENC] { ... }
+my role Encoding::Decoder::Compat[\ENC] { ... }
 
-my role Encoding[Int:D \UNIT-BITS, Int:D \MAX-UNITS = 32 div UNIT-BITS] {
-    my \UNIT-BYTES = UNIT-BITS div 8;
+my enum Encoding::DecoderRV <OK INVALID OVERLONG>;
 
-    method units-for-codepoint(uint32 --> Int:D) { ... }
+my role Encoding[Str $name, int :$unit = 1, int :$factor = 1] {
+    method name(--> Str) { $name }
+    method unit-size(--> int) { $unit }
+    method factor(--> int) { $factor }
 
-    method bytes-for-uni(Uni:D \uni --> Int:D) {
-        uni.map({ self.units-for-code($_) }).sum * UNIT-BYTES;
+    method encode(uint32 $cp, \buf, int $pos --> int) { ... }
+
+    method decode(uint32 $cp is rw, \buf, int $pos, int $more is rw)
+        returns Encoding::DecoderRV { ... }
+
+    method decode-rest(uint32 $cp is rw, \buf, int $pos)
+        returns Encoding::DecoderRV { die }
+
+    method encoder(--> Encoding::Encoder) { die "TODO" }
+
+    proto method decoder(--> Encoding::Decoder) {*}
+    multi method decoder(:$strict!) { Encoding::Decoder::Strict[self].new(|%_) }
+    multi method decoder(:$compat!) { Encoding::Decoder::Compat[self].new(|%_) }
+    multi method decoder(:$lax!) { Encoding::Decoder::Lax[self].new(|%_) }
+    multi method decoder(:$warn?) { Encoding::Decoder::Warn[self].new(|%_) }
+}
+
+my class Encoding::Latin1 does Encoding['Latin-1'] {
+    proto method encode(| --> int) {*}
+    multi method encode(uint32 $cp where $cp > 0xFF, $, int $) { 0 }
+    multi method encode(uint32 $cp, \buf, int $pos --> 1) {
+        nqp::bindpos_i(buf, $pos, $cp);
     }
 
-    method encode-codepoint(uint32 \cp, Buf \buf, int $offset is rw --> Nil) {
-        ...
-    }
-
-    method encode-uni(Uni:D \uni --> blob8:D) {
-        my \buf = buf8.allocate(uni.elems * MAX-UNITS);
-        my int $i = 0;
-        self.encode-codepoint($_, buf, $i) for uni;
-        buf.reallocate($i);
-    }
-
-    proto method encode-str(Str:D \str --> blob8:D) { self.encode-uni({*}, |%_) }
-    multi method encode-str(Str:D \str, :$NFC!  --> blob8:D) { str.NFC }
-    multi method encode-str(Str:D \str, :$NFD!  --> blob8:D) { str.NFD }
-    multi method encode-str(Str:D \str, :$NFKC! --> blob8:D) { str.NFKC }
-    multi method encode-str(Str:D \str, :$NFKD! --> blob8:D) { str.NFKD }
-    multi method encode-str(Str:D \str          --> blob8:D) { str.NFC }
-
-    method decoder(--> Encoding::Decoder:D) {
-        given UNIT-BITS {
-            when 8 { Encoding::Decoder::Generic8[self].new(|%_) }
-            when 16 { Encoding::Decoder::Generic16[self].new(|%_) }
-            when 32 { Encoding::Decoder::Generic32[self].new(|%_) }
-            default { !!! }
-        }
+    method decode(uint32 $cp is rw, \buf, int $pos, int $ is rw --> OK) {
+        $cp = nqp::atpos_i(buf, $pos);
     }
 }
 
-my role Encoding::Decoder::Generic8[Encoding \ENC] does Encoding::Decoder {
-    has $.bytes = buf8.new;
-    has @.separators;
-
-    method encoding { ENC }
-
-    method new(:$sep = ("\n", "\r", "\r\n")) {
-        my \decoder = self.bless;
-        decoder.set-line-separators($sep.list);
-        decoder;
+my class Encoding::UCS2LE does Encoding['UCS2-LE', :unit(2)] {
+    proto method encode(| --> int) {*}
+    multi method encode(uint32 $cp where $cp > 0xFFFF, $, int $) { 0 }
+    multi method encode(uint32 $cp, \buf, int $pos --> 2) {
+        nqp::bindpos_i(buf, $pos, $cp +& 0xFF);
+        nqp::bindpos_i(buf, $pos + 1, $cp +> 8);
     }
 
-    method reset(--> Nil) {
-        $!bytes = buf8.new;
+    method decode(uint32 $cp is rw, \buf, int $pos, int $ is rw --> OK) {
+        $cp = nqp::atpos_i(buf, $pos)
+           +| nqp::atpos_i(buf, $pos + 1) +< 8;
+    }
+}
+
+my class Encoding::UTF8 does Encoding['UTF-8', :factor(4)] {
+    method encode(uint32 $cp, \buf, int $i --> int) {
+        when $cp <= 0x7F {
+            nqp::bindpos_i(buf, $i, $cp);
+            1;
+        }
+
+        when $cp <= 0x7FF {
+            nqp::bindpos_i(buf, $i,     0xC0 +| ($cp +> 6));
+            nqp::bindpos_i(buf, $i + 1, 0x80 +| ($cp +& 0x3F));
+            2;
+        }
+
+        when $cp <= 0xFFFF {
+            nqp::bindpos_i(buf, $i,     0xE0 +|  ($cp +> 12));
+            nqp::bindpos_i(buf, $i + 1, 0x80 +| (($cp +>  6) +& 0x3F));
+            nqp::bindpos_i(buf, $i + 2, 0x80 +| ( $cp        +& 0x3F));
+            3;
+        }
+
+        when $cp <= 0x1FFFFF {
+            nqp::bindpos_i(buf, $i,     0xF0 +|  ($cp +> 18));
+            nqp::bindpos_i(buf, $i + 1, 0x80 +| (($cp +> 12) +& 0x3F));
+            nqp::bindpos_i(buf, $i + 2, 0x80 +| (($cp +>  6) +& 0x3F));
+            nqp::bindpos_i(buf, $i + 3, 0x80 +| ( $cp        +& 0x3F));
+            4;
+        }
+
+        default { 0 }
     }
 
-    method set-line-separators(@seps --> Nil) {
-        @!separators = @seps.map: {
-            when Str {
-                if .&has-unique-decomposition { ENC.encode-codes(.NFC, |%_) }
-                else {
-                    warn qq:to/END/;
-    Separator {.perl} has ambiguous codepoint decomposition - falling back to
-    NFC and NFD variants.
+    method decode(uint32 $cp is rw, \buf, int $pos, int $more is rw) {
+        my int $b = nqp::atpos_i(buf, $pos);
 
-    To silence the warning, either provide manual decompositions as Uni instead
-    of Str or use &split.
-    END
-                    slip ENC.encode-codes(.NFC, |%_),
-                         ENC.encode-codes(.NFD, |%_);
-                }
+        when $b <= 0x7F {
+            $cp = $b;
+            OK;
+        }
+
+        when $b <= 0xBF { INVALID }
+
+        when $b <= 0xDF {
+            $cp = $b +& 0x1F;
+            $more = 1;
+            OK;
+        }
+
+        when $b <= 0xEF {
+            $cp = $b +& 0x0F;
+            $more = 2;
+            OK;
+        }
+
+        when $b <= 0xF7 {
+            $cp = $b +& 0x07;
+            $more = 3;
+            OK;
+        }
+
+        default { INVALID }
+    }
+
+    proto method decode-rest(|) {*}
+    multi method decode-rest(uint32 $cp is rw, \buf, int $pos, 1) {
+        my int $b = nqp::atpos_i(buf, $pos);
+        if $b +& 0xC0 == 0x80 {
+            $cp = $cp +< 6 +| ($b +& 0x3F);
+            $cp +& 0x0780 ?? OK !! OVERLONG;
+        }
+        else { INVALID }
+    }
+    multi method decode-rest(uint32 $cp is rw, \buf, int $pos, 2) {
+        my int $b1 = nqp::atpos_i(buf, $pos);
+        my int $b2 = nqp::atpos_i(buf, $pos + 1);
+        if ($b1 +& 0xC0 == 0x80) && ($b2 +& 0xC0 == 0x80) {
+            $cp = $cp +< 12 +| ($b1 +& 0x3F) +< 6
+                            +| ($b2 +& 0x3F);
+            $cp +& 0xF800 ?? OK !! OVERLONG;
+        }
+        else { INVALID }
+    }
+    multi method decode-rest(uint32 $cp is rw, \buf, int $pos, 3) {
+        my int $b1 = nqp::atpos_i(buf, $pos);
+        my int $b2 = nqp::atpos_i(buf, $pos + 1);
+        my int $b3 = nqp::atpos_i(buf, $pos + 2);
+        if ($b1 +& 0xC0 == 0x80) && ($b2 +& 0xC0 == 0x80)
+                && ($b3 +& 0xC0 == 0x80) {
+            $cp = $cp +< 18 +| ($b1 +& 0x3F) +< 12
+                            +| ($b2 +& 0x3F) +< 6
+                            +| ($b3 +& 0x3F);
+            $cp +& 0x1F0000 ?? OK !! OVERLONG;
+        }
+        else { INVALID }
+    }
+}
+
+my role Encoding::Decoder::Strict[\ENC] does Encoding::Decoder {
+    has $.buf;
+    has int $.pos;
+    has int $.more;
+    has uint32 $.cp;
+
+    method new {
+        method !init {
+            $!buf := buf8.new;
+            self;
+        }
+
+        nqp::create(self)!init;
+    }
+
+    method buf { die }
+
+    method add-bytes(\bytes --> Nil) {
+        nqp::splice($!buf, bytes, nqp::elems($!buf), 0);
+    }
+
+    method decode(--> Nil) {
+        my int $N = nqp::elems($!buf);
+        loop {
+            if $!more {
+                last if $!pos + $!more > $N;
+                die unless ENC.decode-rest($!cp, $!buf, $!pos, $!more) == OK;
+                $!pos = $!pos + $!more;
+                $!more = 0;
             }
-            when Uni { ENC.encode-codes($_, |%_) }
-            when blob8 { $_ }
-            default { die "cannot use {.perl} as separator" }
+            else {
+                last if $!pos >= $N;
+                die unless ENC.decode($!cp, $!buf, $!pos, $!more) == OK;
+                $!pos = $!pos + 1;
+            }
+            print $!cp.chr unless $!more;
         }
-    }
-
-    method add-bytes(blob8:D $bytes --> Nil) {
-        $!bytes.append($bytes);
-    }
-
-    method consume-all-bytes(--> blob8:D) {
-        LEAVE self.reset;
-        $!bytes;
     }
 }
 
-my role Encoding::Decoder::Generic16[$] does Encoding::Decoder {}
-my role Encoding::Decoder::Generic32[$] does Encoding::Decoder {}
+my role Encoding::Decoder::Warn[\ENC] does Encoding::Decoder {}
+my role Encoding::Decoder::Lax[\ENC] does Encoding::Decoder {}
+my role Encoding::Decoder::Compat[\ENC] does Encoding::Decoder {}
 
-my class Encoding::UTF8 does Encoding[8] {
-    method units-for-codepoint(uint32 $_ --> Int:D) {
-        when $_ <= 0x7F     { 1 }
-        when $_ <= 0x7FF    { 2 }
-        when $_ <= 0xFFFF   { 3 }
-        when $_ <= 0x1FFFFF { 4 }
-        default { !!! }
-    }
-
-    method encode-codepoint(uint32 $_, Buf \buf, int $offset is rw --> Nil) {
-        when $_ <= 0x7F {
-            nqp::bindpos_i(buf, $offset, $_);
-            $offset = $offset + 1;
-        }
-
-        when $_ <= 0x7FF {
-            nqp::bindpos_i(buf, $offset,     0xC0 +| ($_ +> 6));
-            nqp::bindpos_i(buf, $offset + 1, 0x80 +| ($_ +& 0x3F));
-            $offset = $offset + 2;
-        }
-
-        when $_ <= 0xFFFF {
-            nqp::bindpos_i(buf, $offset,     0xE0 +|  ($_ +> 12));
-            nqp::bindpos_i(buf, $offset + 1, 0x80 +| (($_ +>  6) +& 0x3F));
-            nqp::bindpos_i(buf, $offset + 2, 0x80 +| ( $_        +& 0x3F));
-            $offset = $offset + 3;
-        }
-
-        when $_ <= 0x1FFFFF {
-            nqp::bindpos_i(buf, $offset,     0xF0 +|  ($_ +> 18));
-            nqp::bindpos_i(buf, $offset + 1, 0x80 +| (($_ +> 12) +& 0x3F));
-            nqp::bindpos_i(buf, $offset + 2, 0x80 +| (($_ +>  6) +& 0x3F));
-            nqp::bindpos_i(buf, $offset + 3, 0x80 +| ( $_        +& 0x3F));
-            $offset = $offset + 4;
-        }
-
-        default { !!! }
-    }
-}
+Encoding::Registry.add(Encoding::Latin1, 'latin1');
+Encoding::Registry.add(Encoding::UTF8, 'utf8');
 
 sub EXPORT { BEGIN Map.new((Encoding => Encoding)) }

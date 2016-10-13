@@ -169,49 +169,151 @@ my class Encoding::UTF8 does Encoding['UTF-8', :factor(4)] {
     }
 }
 
-my role Encoding::Decoder::Strict[\ENC] does Encoding::Decoder {
+my class X::Encoding is Exception {}
+my role X::Encoding::Encode {}
+my role X::Encoding::Decode {}
+
+my class X::Encoding::Invalid is X::Encoding does X::Encoding::Decode {
+    has $.encoding;
+    has $.bytes;
+
+    proto message(|) {*}
+    multi method message($enc, $bytes) {
+        "Invalid {$enc.name}: "~ $bytes.list.fmt('%02X', ' ').join(' ');
+    }
+    multi method message {
+        self.message($!encoding, $!bytes);
+    }
+}
+
+my class X::Encoding::Overlong is X::Encoding does X::Encoding::Decode {
+    has $.encoding;
+    has $.bytes;
+    has $.codepoint;
+
+    proto message(|) {*}
+    multi method message($enc, $bytes, $cp) {
+        "Overlong {$enc.name} for {nqp::getuniname($cp)}: "
+            ~ $bytes.list.fmt('%02X', ' ').join(' ');
+    }
+    multi method message {
+        self.message($!encoding, $!bytes, $!codepoint);
+    }
+}
+
+my role Encoding::Decoder::Generic does Encoding::Decoder {
     has $.buf;
+    has $.codes;
     has int $.pos;
     has int $.more;
     has uint32 $.cp;
 
-    method new {
-        method !init {
-            $!buf := buf8.new;
-            self;
-        }
+    method encoding { ... }
+    proto method handle($) {*}
+    multi method handle(OK) {}
+    multi method handle(INVALID) { ... }
+    multi method handle(OVERLONG) { ... }
 
-        nqp::create(self)!init;
+    method !init(%args) {
+        $!buf := buf8.new;
+        $!codes := buf32.new;
+        self.?BUILD(|%args);
+        self;
     }
 
-    method buf { die }
+    method new {
+        nqp::create(self)!init(%_);
+    }
+
+    method buf { $!buf.subbuf(0) }
+
+    method last-decoded-bytes {
+        my $size := self.encoding.unit-size;
+        $!more ?? $!buf.subbuf($!pos - $size, $size + $!more)
+               !! $!buf.subbuf($!pos, $size);
+    }
+
+    method codes { $!codes.subbuf(0) }
 
     method add-bytes(\bytes --> Nil) {
         nqp::splice($!buf, bytes, nqp::elems($!buf), 0);
     }
 
     method decode(--> Nil) {
+        my \ENC = self.encoding;
         my int $N = nqp::elems($!buf);
         loop {
             if $!more {
                 last if $!pos + $!more > $N;
-                die unless ENC.decode-rest($!cp, $!buf, $!pos, $!more) == OK;
+                self.handle(ENC.decode-rest($!cp, $!buf, $!pos, $!more));
                 $!pos = $!pos + $!more;
                 $!more = 0;
             }
             else {
                 last if $!pos >= $N;
-                die unless ENC.decode($!cp, $!buf, $!pos, $!more) == OK;
-                $!pos = $!pos + 1;
+                self.handle(ENC.decode($!cp, $!buf, $!pos, $!more));
+                $!pos = $!pos + ENC.unit-size;
             }
-            print $!cp.chr unless $!more;
         }
     }
 }
 
-my role Encoding::Decoder::Warn[\ENC] does Encoding::Decoder {}
-my role Encoding::Decoder::Lax[\ENC] does Encoding::Decoder {}
-my role Encoding::Decoder::Compat[\ENC] does Encoding::Decoder {}
+my role Encoding::Decoder::Replacing does Encoding::Decoder::Generic {
+    has $.replacement-char;
+    submethod BUILD(:$!replacement-char = '?') {}
+}
+
+my role Encoding::Decoder::Strict[\ENC] does Encoding::Decoder::Generic {
+    method encoding { ENC }
+
+    multi method handle(INVALID) {
+        die X::Encoding::Invalid.new(
+            :encoding(ENC),
+            :bytes(self.last-decoded-bytes));
+    }
+
+    multi method handle(OVERLONG) {
+        die X::Encoding::Overlong.new(
+            :encoding(ENC),
+            :bytes(self.last-decoded-bytes),
+            :codepoint(self.cp));
+    }
+}
+
+my role Encoding::Decoder::Warn[\ENC] does Encoding::Decoder::Replacing {
+    method encoding { ENC }
+
+    multi method handle(INVALID) {
+        warn X::Encoding::Invalid.message(ENC, self.last-decoded-bytes);
+        note 'TODO: use replacement char';
+    }
+
+    multi method handle(OVERLONG) {
+        warn X::Encoding::Overlong.message(ENC, self.last-decoded-bytes, self.cp);
+    }
+}
+
+my role Encoding::Decoder::Lax[\ENC] does Encoding::Decoder::Replacing {
+    method encoding { ENC }
+
+    multi method handle(INVALID) {
+        note 'TODO: use replacement char';
+    }
+
+    multi method handle(OVERLONG) {}
+}
+
+my role Encoding::Decoder::Compat[\ENC] does Encoding::Decoder {
+    method encoding { ENC }
+
+    multi method handle(INVALID) {
+        die 'TODO';
+    }
+
+    multi method handle(OVERLONG) {
+        die 'TODO';
+    }
+}
 
 Encoding::Registry.add(Encoding::Latin1, 'latin1');
 Encoding::Registry.add(Encoding::UTF8, 'utf8');

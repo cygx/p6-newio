@@ -1,8 +1,23 @@
 use lib '.';
-use Encoding;
+use NewIO;
 
-my \buf = Encoding::Buf.new;
-buf.add(blob8.new(1, 2, 3));
-buf.add(Encoding::Buf::DENORMAL);
-buf.add(blob16.new(4, 5, 6));
-buf.say;
+my \N = 100;
+my \FILE = 'test.p6';
+
+do {
+    my $i = 0;
+    my $start = now;
+    $i += IO::Path.new(FILE).lines(:enc<latin1>) for ^N;
+    my $end = now;
+    say $end - $start;
+    say $i;
+}
+
+do {
+    my $i = 0;
+    my $start = now;
+    $i += NewIO::Path.new(FILE).lines(:enc<latin1>) for ^N;
+    my $end = now;
+    say $end - $start;
+    say $i;
+}

@@ -1,72 +1,456 @@
-use Encoding;
+# TODO: reposition cursor before writes
+
 use nqp;
+
+my role Encoding {
+    method decoder { ... }
+    method max-bytes-per-code { ... }
+}
+
+my class Encoding::UTF8 does Encoding {
+    method max-bytes-per-code { !!! }
+    method decoder { !!! }
+}
+
+my class Encoding::Latin1 does Encoding {
+    class Decoder {
+        has $!bytes;
+        has int $!mark;
+        has int $!nl-pos;
+        has int $!nl-len;
+
+        submethod BUILD {
+            $!bytes := buf8.new;
+        }
+
+        method reset {
+            $!bytes.reallocate(0);
+            self.unmark;
+        }
+
+        method unmark {
+            $!mark = 0;
+            $!nl-pos = 0;
+            $!nl-len = 0;
+        }
+
+        method add-bytes(buf8:D $buf) {
+            $!bytes.append($buf);
+        }
+
+        method is-continuable {
+            $!bytes[*-1] == 0x0D;
+        }
+
+        method available-bytes {
+            $!bytes.elems;
+        }
+
+        method available-codes {
+            $!bytes.elems;
+        }
+
+        method available-graphs {
+            my int $n = $!bytes.elems;
+            loop (my int $i = 1; $i < $n; $i = $i + 1) {
+                $n = $n - 1
+                    if $!bytes[$i-1] == 0x0D && $!bytes[$i] == 0x0A;
+            }
+
+            $n;
+        }
+
+        method consume-byte {
+            die 'underflow' unless $!bytes;
+            $!bytes.splice(0, 1)[0];
+        }
+
+        method consume-code {
+            die 'underflow' unless $!bytes;
+            $!bytes.splice(0, 1)[0];
+        }
+
+        method consume-graph {
+            given $.available-graphs {
+                when 0 { die 'underflow' }
+                when 1 {
+                    LEAVE $!bytes.reallocate(0);
+                    chr $!bytes[0];
+                }
+                default {
+                    if $!bytes[0] == 0x0D && $!bytes[1] == 0x0A {
+                        $!bytes.splice(0, 2);
+                        "\r\n";
+                    }
+                    else { chr $!bytes.splice(0, 1)[0] }
+                }
+            }
+        }
+
+        method consume-bytes(uint $n) {
+            die 'underflow' if $n > $.available-bytes;
+            $!bytes.splice(0, $n);
+        }
+
+        method consume-codes(uint $n) {
+            die 'underflow' if $n > $.available-codes;
+            Uni.new(|$!bytes.splice(0, $n));
+        }
+
+        method consume-graphs(uint $n) {
+            die 'underflow' if $n > $.available-graphs;
+            my int $len = $n;
+            loop (my int $i = 1; $i < $n; $i = $i + 1) {
+                $len = $len + 1
+                    if $!bytes[$i-1] == 0x0D && $!bytes[$i] == 0x0A;
+            }
+            nqp::strfromcodes(blob32.new(|$!bytes.splice(0, $len)));
+        }
+
+        method consume-all-bytes {
+            LEAVE $!bytes := buf8.new;
+            $!bytes || Nil;
+        }
+
+        method consume-all-codes {
+            my $codes;
+            my int $len = nqp::elems($!bytes);
+            nqp::if($len,
+                nqp::stmts(
+                    nqp::splice(
+                        ($codes := nqp::create(Uni)),
+                        $!bytes.splice(0),
+                        0, 0
+                    ),
+                    $codes
+                ),
+                Nil
+            );
+        }
+
+        method consume-all-graphs {
+            my $buf;
+            nqp::if(nqp::elems($!bytes),
+                nqp::stmts(
+                    ($buf := buf32.new),
+                    nqp::splice($buf, $!bytes, 0, 0),
+                    nqp::setelems($!bytes, 0),
+                    nqp::strfromcodes($buf)),
+                Nil);
+        }
+
+        method consume-line-bytes($chomp) {
+            return Nil if $!nl-pos == 0 && $!nl-len == 0;
+
+            my $line;
+            if $chomp {
+                $line := $!bytes.splice(0, $!nl-pos);
+                $!bytes.splice(0, $!nl-len) if $!nl-len;
+            }
+            else {
+                $line := $!bytes.splice(0, $!nl-pos + $!nl-len)
+            }
+            
+            self.unmark;
+            $line;
+        }
+
+        method consume-line-codes($chomp) {
+            my $bytes := self.consume-line-bytes($chomp);
+            if $bytes.DEFINITE {
+                my $codes := nqp::create(Uni);
+                nqp::splice($codes, $bytes, 0, 0);
+                $codes;
+            }
+            else { Nil }
+        }
+
+        method consume-line-graphs($chomp) {
+            my $bytes := self.consume-line-bytes($chomp);
+            $bytes.DEFINITE ?? nqp::strfromcodes(blob32.new(|$bytes)) !! Nil;
+        }
+
+        method mark-line($nl) {
+            my int $pos = $!mark;
+            my int $nl-len = $nl.elems;
+            my int $len = $!bytes.elems - $nl-len;
+            while $pos <= $len {
+                #if $!bytes[$pos..^$pos+$nl-len] eqv $nl[0..*] {
+                if $!bytes[$pos] == $nl[0] {
+                    $!nl-pos = $pos;
+                    $!nl-len = $nl.elems;
+                    return True;
+                }
+                $pos = $pos + 1;
+            }
+
+            $!mark = $pos;
+            False;
+        }
+    }
+
+    method max-bytes-per-code { 1 }
+
+    method decoder() { Decoder.new(|%_) }
+}
 
 my constant Path = IO::Path;
 
+my %ENCODINGS =
+    'utf8' => Encoding::UTF8,
+    'latin1' => Encoding::Latin1;
+
 my role IO { ... }
 
-my role IO::Stream {
-    sub unsupported(&method) is hidden-from-backtrace {
-        die "IO operation '{&method.name}' not supported by {::?CLASS.^name}";
+my class IO::Handle {
+    has $.encoding;
+    has $.decoder;
+    has $.block-size;
+    has $.nl-out-bytes;
+    has $.nl-in-code;
+    has $.chomp;
+
+    submethod BUILD(
+            :$enc = Encoding::UTF8,
+            :$!block-size = 512,
+            :$!chomp = True
+    ) {
+        $!encoding = do given $enc {
+            when Encoding { $enc }
+            when %ENCODINGS{$enc}:exists { %ENCODINGS{$enc} }
+            default { die "unsupported encoding '$enc'" }
+        }
+
+        $!decoder = $!encoding.decoder(|%_);
+
+        $!nl-out-bytes = BEGIN blob8.new(0x0A);
+        $!nl-in-code = BEGIN blob32.new(0x0A);
     }
 
-    method close(--> True) { unsupported &?ROUTINE }
+    sub unsupported(&method) is hidden-from-backtrace {
+        die "IO operation {&method.name} not supported by {::?CLASS.^name}";
+    }
 
-    method read(Int:D --> blob8:D) { unsupported &?ROUTINE }
-    method readline(--> blob8:D) { unsupported &?ROUTINE }
-    method readall(--> blob8:D) { unsupported &?ROUTINE }
-    method write(blob8:D --> True) { unsupported &?ROUTINE }
-    method getbyte(--> uint8) { unsupported &?ROUTINE }
-    method putbyte(uint8 --> True) { unsupported &?ROUTINE }
+    method OPEN     { unsupported &?ROUTINE }
+    method CLOSE    { unsupported &?ROUTINE }
+    method READ     { unsupported &?ROUTINE }
+    method READALL  { unsupported &?ROUTINE }
+    method WRITE    { unsupported &?ROUTINE }
+    method PUTBYTE  { unsupported &?ROUTINE }
+    method PUTCODE  { unsupported &?ROUTINE }
 
-    method uniread(Int:D --> Uni:D) { unsupported &?ROUTINE }
-    method unireadall(--> Uni:D) { unsupported &?ROUTINE }
-    method uniwrite(Uni:D --> True) { unsupported &?ROUTINE }
-    method uniget(--> Uni:D) { unsupported &?ROUTINE }
-    method unigetc(--> uint32) { unsupported &?ROUTINE }
-    method uniput(--> Uni:D) { unsupported &?ROUTINE }
-    method uniputc(uint32 --> True) { unsupported &?ROUTINE }
+    method NEED-BYTES($n) {
+        my $missing := $n - $!decoder.available-bytes;
+        if $missing > 0 {
+            my $size := $missing max $!block-size;
+            $!decoder.add-bytes($_) with self.READ($size);
+        }
+    }
 
-    method readchars(Int:D --> Str:D) { unsupported &?ROUTINE }
-    method readallchars(--> Str:D) { unsupported &?ROUTINE }
-    method print(Str:D --> True) { unsupported &?ROUTINE }
-    method print-nl(--> True) { unsupported &?ROUTINE }
-    method get(--> Str:D) { unsupported &?ROUTINE }
-    method getc(--> Str:D) { unsupported &?ROUTINE }
-    method put(Str:D --> True) { unsupported &?ROUTINE }
-}
+    method NEED-CODES($n) {
+        my $missing := $n - $!decoder.available-codes;
+        if $missing > 0 {
+            my $size := $missing * $!encoding.max-bytes-per-code max $!block-size;
+            $!decoder.add-bytes($_) with self.READ($size);
+        }
+    }
 
-my role IO::CodedStream does IO::Stream {
-    method encoding(--> Encoding:U) { ... }
-    method decoder(--> Encoding::Decoder:D) { ... }
-    method source(--> IO::Stream:D) { ... }
+    method NEED-GRAPHS($n) {
+        while (my $missing := $n - $!decoder.available-graphs) > 0
+                || ($missing == 0 && $!decoder.is-continuable) {
+            my $size := $missing * $!encoding.max-bytes-per-code max $!block-size;
+            $!decoder.add-bytes(self.READ($size) // last);
+        }
+    }
 
-    method close {
-        self.source.close;
-        self.decoder.reset;
+    method NEED-LINE {
+        $!decoder.unmark;
+        until $!decoder.mark-line($!nl-in-code) {
+            $!decoder.add-bytes(self.READ($!block-size) // last);
+        }
+    }
+
+    method close(--> True) {
+        $!decoder.reset;
+        self.CLOSE;
+    }
+
+    method read(UInt:D $n --> blob8:D) {
+        self.NEED-BYTES($n);
+        $!decoder.consume-bytes($n);
+    }
+
+    method readline(--> blob8:D) {
+        self.NEED-LINE;
+        $!decoder.consume-line-bytes($!chomp);
     }
 
     method readall(--> blob8:D) {
-        my \decoder = self.decoder;
-        decoder.add-bytes(self.source.readall);
-        decoder.consume-all-bytes;
+        $!decoder.add-bytes(self.READALL);
+        $!decoder.consume-all-bytes;
+    }
+
+    method write(blob8:D $bytes --> True) {
+        self.WRITE($bytes);
+    }
+
+    method getbyte(--> uint8) {
+        self.NEED-BYTES(1);
+        $!decoder.consume-byte;
+    }
+
+    method putbyte(uint8 $byte --> True) {
+        self.PUTBYTE($byte);
+    }
+
+    method uniread(UInt:D $n --> Uni:D) {
+        self.NEED-CODES($n);
+        $!decoder.consume-codes($n);
     }
 
     method unireadall(--> Uni:D) {
-        my \decoder = self.decoder;
-        decoder.add-bytes(self.source.readall);
-        decoder.consume-all-codes;
+        $!decoder.add-bytes(self.READALL);
+        $!decoder.consume-all-codes;
+    }
+
+    method uniwrite(Uni:D $uni --> True) {
+        self.WRITE($!encoding.encode($uni));
+    }
+
+    method uniget(--> Uni:D) {
+        self.NEED-LINE;
+        $!decoder.consume-line-codes($!chomp);
+    }
+
+    method unigetc(--> uint32) {
+        self.NEED-CODES(1);
+        $!decoder.consume-code;
+    }
+
+    method uniput(Uni:D $uni --> True) {
+        self.WRITE($!encoding.encode($uni));
+        self.WRITE($!nl-out-bytes);
+    }
+
+    method uniputc(uint32 $cp --> True) {
+        self.WRITE($!encoding.encode($cp));
+    }
+
+    method readchars(UInt:D $n --> Str:D) {
+        self.NEED-GRAPHS($n);
+        $!decoder.consume-graphs($n);
     }
 
     method readallchars(--> Str:D) {
-        my \decoder = self.decoder;
-        decoder.add-bytes(self.source.readall);
-        decoder.consume-all-graphs;
+        $!decoder.add-bytes(self.READALL);
+        $!decoder.consume-all-graphs;
+    }
+
+    method print(Str:D $str --> True) {
+        self.WRITE($!encoding.encode($str));
+    }
+
+    method print-nl(--> True) {
+        self.WRITE($!nl-out-bytes);
+    }
+
+    method get(--> Str:D) {
+        self.NEED-LINE;
+        $!decoder.consume-line-graphs($!chomp);
+    }
+
+    method getc(--> Str:D) {
+        self.NEED-GRAPHS(1);
+        $!decoder.consume-graph;
+    }
+
+    method put(Str:D $str --> True) {
+        self.WRITE($!encoding.encode($str));
+        self.WRITE($!nl-out-bytes);
     }
 }
 
-my class IO::VMHandle does IO::Stream {
+my role IO[IO::Handle:U \HANDLE] {
+    method open(--> IO::Handle:D) {
+        my \handle = HANDLE.new(io => self, |%_);
+        handle.OPEN(|%_);
+        handle;
+    }
+
+    proto method slurp {*}
+    multi method slurp(:$bin! --> blob8:D) {
+        my \handle = self.open(|%_);
+        LEAVE handle.close;
+        handle.readall;
+    }
+    multi method slurp(:$uni! --> Uni:D) {
+        my \handle = self.open(|%_);
+        LEAVE handle.close;
+        handle.unireadall;
+    }
+    multi method slurp(--> Str:D) {
+        my \handle = self.open(|%_);
+        LEAVE handle.close;
+        handle.readallchars;
+    }
+
+    proto method lines {*}
+    multi method lines(:$bin! --> Seq:D) {
+        my \handle = self.open(|%_);
+        Seq.new(nqp::create(class :: does Iterator {
+            method pull-one() is raw {
+                handle.readline // do {
+                    handle.close;
+                    IterationEnd
+                }
+            }
+
+            method push-all(\target --> IterationEnd) {
+                my $line;
+                target.push($line) while ($line := handle.readline).DEFINITE;
+                handle.close;
+            }
+        }));
+    }
+    multi method lines(:$uni! --> Seq:D) {
+        my \handle = self.open(|%_);
+        Seq.new(nqp::create(class :: does Iterator {
+            method pull-one() is raw {
+                handle.uniget // do {
+                    handle.close;
+                    IterationEnd
+                }
+            }
+
+            method push-all(\target --> IterationEnd) {
+                my $line;
+                target.push($line) while ($line := handle.uniget).DEFINITE;
+                handle.close;
+            }
+        }));
+    }
+    multi method lines(--> Seq:D) {
+        my \handle = self.open(|%_);
+        Seq.new(nqp::create(class :: does Iterator {
+            method pull-one() is raw {
+                handle.get // do {
+                    handle.close;
+                    IterationEnd
+                }
+            }
+
+            method push-all(\target --> IterationEnd) {
+                my $line;
+                target.push($line) while ($line := handle.get).DEFINITE;
+                handle.close;
+            }
+        }));
+    }
+}
+
+my class IO::FileHandle is IO::Handle {
     has $!fh;
+    has $!path;
 
     sub mode(
         :$r, :$w, :$x, :$a, :$update,
@@ -109,162 +493,40 @@ my class IO::VMHandle does IO::Stream {
         $mode;
     }
 
-    method new(Mu \fh --> IO::VMHandle:D) {
-        nqp::create(self)!SET-FH(nqp::decont(fh));
+    submethod BUILD(:$io) {
+        $!path = $io.abspath;
     }
-
-    method perl(--> Str:D) {
-        'IO::VMHandle.new(...)';
-    }
-
-    method !SET-FH(Mu \fh) {
-        $!fh := fh;
-        self;
-    }
-
-    method open-file(Str:D \path --> IO::VMHandle:D) {
-        self.new(nqp::open(path, mode(|%_)));
-    }
-
-    method stdin(--> IO::VMHandle:D) { self.new(nqp::getstdin()) }
-    method stdout(--> IO::VMHandle:D) { self.new(nqp::getstdout()) }
-    method stderr(--> IO::VMHandle:D) { self.new(nqp::getstderr()) }
 
     method fd(--> int) {
         nqp::filenofh($!fh);
     }
 
-    method close(--> True) {
+    method OPEN {
+        $!fh := nqp::open($!path, mode(|%_));
+    }
+
+    method CLOSE {
         nqp::closefh($!fh);
     }
 
-    method read(Int:D \n --> blob8:D) {
+    method READ(Int:D \n --> blob8:D) {
         nqp::readfh($!fh, buf8.new, nqp::unbox_i(n)) || Nil;
     }
 
-    method readall(--> blob8:D) {
+    method READALL(--> blob8:D) {
         my \buf = buf8.new;
-        loop { buf.append(nqp::readfh($!fh, buf8.new, 0x100000) || last) }
+        my $chunk;
+        nqp::while(
+            nqp::elems($chunk := nqp::readfh($!fh, buf8.new, 0x100000)),
+            nqp::splice(buf, $chunk, nqp::elems(buf), 0));
         buf;
     }
 
-    method write(blob8:D \buf --> True) {
+    method WRITE(blob8:D \buf --> True) {
         nqp::writefh($!fh, buf);
     }
 }
 
-my class IO::Handle does IO::CodedStream {
-    has $.source;
-    has $.encoding;
-    has $.decoder;
+my class IO::Path is Path does IO[IO::FileHandle] {}
 
-    submethod BUILD(:$!source, :$enc = Encoding::UTF8) {
-        $!encoding = do given $enc {
-            when Encoding { $enc }
-            when 'utf8' { Encoding::UTF8 }
-            when Str { die "unknown encoding '$_'" }
-            default { die "invalid encoding argument {$enc.perl}" }
-        }
-
-        $!decoder = $!encoding.decoder(|%_);
-    }
-}
-
-my role IO {
-    method open-stream(--> IO::Stream:D) { ... }
-
-    method handle-type(--> IO::Handle:U) { IO::Handle }
-
-    method open(--> IO::Handle:D) {
-        self.handle-type.new(source => self.open-stream(|%_), io => self, |%_);
-    }
-
-    proto method slurp {*}
-    multi method slurp(:$bin! --> blob8:D) {
-        my \stream = self.open(|%_);
-        LEAVE stream.close;
-        stream.readall;
-    }
-    multi method slurp(:$uni! --> Uni:D) {
-        my \stream = self.open(|%_);
-        LEAVE stream.close;
-        stream.unireadall;
-    }
-    multi method slurp(--> Str:D) {
-        my \stream = self.open(|%_);
-        LEAVE stream.close;
-        stream.readallchars;
-    }
-
-    proto method lines {*}
-    multi method lines(:$bin! --> Seq:D) {
-        my \stream = self.open(|%_);
-        Seq.new(nqp::create(class :: does Iterator {
-            method pull-one() is raw {
-                stream.readline // do {
-                    stream.close;
-                    IterationEnd
-                }
-            }
-
-            method push-all(\target --> IterationEnd) {
-                my $line;
-                target.push($line) while ($line := stream.readline).DEFINITE;
-                stream.close;
-            }
-        }));
-    }
-    multi method lines(:$uni! --> Seq:D) {
-        my \stream = self.open(|%_);
-        Seq.new(nqp::create(class :: does Iterator {
-            method pull-one() is raw {
-                stream.uniget // do {
-                    stream.close;
-                    IterationEnd
-                }
-            }
-
-            method push-all(\target --> IterationEnd) {
-                my $line;
-                target.push($line) while ($line := stream.uniget).DEFINITE;
-                stream.close;
-            }
-        }));
-    }
-    multi method lines(--> Seq:D) {
-        my \stream = self.open(|%_);
-        Seq.new(nqp::create(class :: does Iterator {
-            method pull-one() is raw {
-                stream.get // do {
-                    stream.close;
-                    IterationEnd
-                }
-            }
-
-            method push-all(\target --> IterationEnd) {
-                my $line;
-                target.push($line) while ($line := stream.get).DEFINITE;
-                stream.close;
-            }
-        }));
-    }
-}
-
-my class IO::FileHandle is IO::Handle {
-    has $.path;
-    submethod BUILD(:$io) { $!path = Path.new-from-absolute-path($io.abspath) }
-}
-
-my role IO::FileIO does IO {
-    method abspath(--> Str:D) { ... }
-
-    method handle-type(--> IO::Handle:U) { IO::FileHandle }
-
-    method open-stream(--> IO::Stream:D) {
-        IO::VMHandle.open-file(self.abspath, |%_);
-    }
-}
-
-my class IO::Path is Path does IO::FileIO {}
-
-sub EXPORT { BEGIN Map.new((IO => IO)) }
+sub EXPORT { BEGIN Map.new((NewIO => IO)) }

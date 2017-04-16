@@ -1,7 +1,7 @@
 use lib '.';
 use NewIO;
 
-my \N = 100;
+my \N = 200;
 my \FILE = 'test.p6';
 
 do {

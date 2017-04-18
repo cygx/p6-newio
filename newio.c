@@ -19,6 +19,9 @@ EXPORT void newio_copy(uint8_t *dst, const uint8_t *src,
 EXPORT void newio_move(uint8_t *dst, const uint8_t *src,
     uint64_t dstpos, uint64_t srcpos, uint64_t count);
 
+EXPORT int64_t newio_decode_latin1(
+    uint32_t *dst, const uint8_t *src, int64_t count);
+
 enum {
     NEWIO_READ      = 1 << 0,
     NEWIO_WRITE     = 1 << 1,
@@ -169,17 +172,6 @@ int64_t newio_read(uint64_t fd, uint8_t *buf, uint64_t offset, uint64_t count)
     return ok ? read : newio_errno();
 }
 
-#if 0
-EXPORT int64_t newio_read16le(uint64_t fd, uint16_t *buf, uint64_t count);
-EXPORT int64_t newio_read16be(uint64_t fd, uint16_t *buf, uint64_t count);
-EXPORT int64_t newio_read32le(uint64_t fd, uint32_t *buf, uint64_t count);
-EXPORT int64_t newio_read32be(uint64_t fd, uint32_t *buf, uint64_t count);
-
-EXPORT int64_t newio_decode_latin1(
-    uint32_t *dst, const uint8_t *src, int64_t count);
-EXPORT int64_t newio_decode_utf16(
-    uint32_t *dst, const uint16_t *src, int64_t count);
-
 int64_t newio_decode_latin1(uint32_t *dst, const uint8_t *src, int64_t count)
 {
     for(int64_t i = 0; i < count; ++i)
@@ -187,6 +179,15 @@ int64_t newio_decode_latin1(uint32_t *dst, const uint8_t *src, int64_t count)
 
     return count;
 }
+
+#if 0
+EXPORT int64_t newio_read16le(uint64_t fd, uint16_t *buf, uint64_t count);
+EXPORT int64_t newio_read16be(uint64_t fd, uint16_t *buf, uint64_t count);
+EXPORT int64_t newio_read32le(uint64_t fd, uint32_t *buf, uint64_t count);
+EXPORT int64_t newio_read32be(uint64_t fd, uint32_t *buf, uint64_t count);
+
+EXPORT int64_t newio_decode_utf16(
+    uint32_t *dst, const uint16_t *src, int64_t count);
 
 int64_t newio_decode_utf16(uint32_t *dst, const uint16_t *src, int64_t count)
 {

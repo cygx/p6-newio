@@ -1,5 +1,6 @@
 use NativeCall;
 use MONKEY-TYPING;
+use nqp;
 
 sub newio_errormsg(int64 --> Str) is native<newio.dll> {*}
 sub newio_stdhandle(uint32 --> uint64) is native<newio.dll> {*}
@@ -11,10 +12,41 @@ sub newio_validate(uint64 --> int64) is native<newio.dll> {*}
 sub newio_read(uint64, buf8, uint64, uint64 --> int64) is native<newio.dll> {*}
 sub newio_copy(buf8, blob8, uint64, uint64, uint64) is native<newio.dll> {*}
 sub newio_move(buf8, blob8, uint64, uint64, uint64) is native<newio.dll> {*}
+sub newio_decode_latin1(Uni, blob8, int64 --> int64) is native<newio.dll> {*}
 
 my constant Path = IO::Path;
 my constant NUL = "\0";
 my constant BLOCKSIZE = 512;
+
+my role Encoding {
+    method min-bytes-per-code { ... }
+    method max-bytes-per-code { ... }
+    method decode(blob8:D --> Uni:D) { ... }
+#    method encode(Uni:D --> blob8:D) { ... }
+}
+
+my class Encoding::Latin1 does Encoding {
+    method min-bytes-per-code { 1 }
+    method max-bytes-per-code { 1 }
+
+    method decode(blob8:D $bytes --> Uni:D) {
+        my int $count = $bytes.elems;
+        my $uni := nqp::create(Uni);
+        nqp::setelems($uni, $count);
+        newio_decode_latin1($uni, $bytes, $count);
+        $uni;
+    }
+}
+
+my class Encoding::Utf8 does Encoding {
+    method min-bytes-per-code { 1 }
+    method max-bytes-per-code { 4 }
+    method decode(blob8:D --> Uni:D) { !!! }
+}
+
+my %ENCODINGS =
+    'latin1' => Encoding::Latin1,
+    'utf8' => Encoding::Utf8;
 
 my role IO { ... }
 
@@ -58,10 +90,7 @@ my role IO::Handle {
     }
 
     method readall(--> blob8:D) {
-        my $want := self.GET-SIZE - self.GET-POS + self.AVAILABLE-BYTES;
-        my $buf := buf8.allocate($want);
-        self.LOAD-BYTES($want);
-        self.CONSUME-BYTES($buf);
+        self.READALL;
     }
 
     method write(blob8:D $bytes --> True) { die }
@@ -69,7 +98,11 @@ my role IO::Handle {
     method putbyte(uint8 $byte --> True) { die }
 
     method uniread(UInt:D $n --> Uni:D) { die }
-    method unireadall(--> Uni:D) { die }
+
+    method unireadall(--> Uni:D) {
+        self.ENCODING.decode(self.READALL);
+    }
+
     method uniwrite(Uni:D $uni --> True) { die }
     method uniget(--> Uni:D) { die }
     method unigetc(--> uint32) { die }
@@ -77,7 +110,11 @@ my role IO::Handle {
     method uniputc(uint32 $cp --> True) { die }
 
     method readchars(UInt:D $n --> Str:D) { die }
-    method readallchars(--> Str:D) { die }
+
+    method readallchars(--> Str:D) {
+        nqp::strfromcodes(self.unireadall);
+    }
+
     method print(Str:D $str --> True) { die }
     method print-nl(--> True) { die  }
     method get(--> Str:D) { die }
@@ -88,6 +125,23 @@ my role IO::Handle {
 my role IO[IO::Handle:U \HANDLE] {
     method open(--> IO::Handle:D) {
         HANDLE.new(io => self, |%_);
+    }
+
+    proto method slurp {*}
+    multi method slurp(:$bin! --> blob8:D) {
+        my \handle = self.open(|%_);
+        LEAVE handle.close;
+        handle.readall;
+    }
+    multi method slurp(:$uni! --> Uni:D) {
+        my \handle = self.open(|%_);
+        LEAVE handle.close;
+        handle.unireadall;
+    }
+    multi method slurp(--> Str:D) {
+        my \handle = self.open(|%_);
+        LEAVE handle.close;
+        handle.readallchars;
     }
 }
 
@@ -130,13 +184,36 @@ my class IO::OsHandle does IO::Handle {
 my class IO::BufferedOsHandle is IO::OsHandle {
     has $!bytes = buf8.allocate(BLOCKSIZE);
     has uint $!pos;
+    has $.encoding;
 
     sub round-up(uint $u, uint $m = BLOCKSIZE) {
         (($u + $m - 1) div $m) * $m;
     }
 
+    submethod BUILD(:$enc = Encoding::Utf8) {
+        $!encoding = do given $enc {
+            when Encoding { $enc }
+            when %ENCODINGS{$enc}:exists { %ENCODINGS{$enc} }
+            default { die "unsupported encoding '$enc'" }
+        }
+    }
+
+    method ENCODING { $!encoding }
+
     method AVAILABLE-BYTES {
         $!pos;
+    }
+
+    method READALL {
+        my uint $have = self.AVAILABLE-BYTES;
+        my uint $rest = self.GET-SIZE - self.GET-POS;
+        my uint $all = $have + $rest;
+        my $buf := buf8.allocate($all);
+        newio_copy($buf, $!bytes, 0, 0, $have);
+        my int64 $rv = newio_read($.fd, $buf, $have, $rest);
+        die X::IO.new(os-error => newio_errormsg($rv)) if $rv < 0;
+        die X::IO.new(os-error => 'underflow') if $rv != $rest;
+        $buf;
     }
 
     method LOAD-BYTES(uint $n) {
@@ -170,9 +247,10 @@ my class IO::FileHandle is IO::BufferedOsHandle {
     has uint64 $.mode;
 
     sub mode(
-        :$r, :$u, :$w, :$a, :$x, :$ru, :$rw, :$ra, :$rx, 
+        :$r, :$u, :$w, :$a, :$x, :$ru, :$rw, :$ra, :$rx,
         :$read is copy, :$write is copy, :$append is copy,
-        :$create is copy, :$exclusive is copy, :$truncate is copy
+        :$create is copy, :$exclusive is copy, :$truncate is copy,
+        *%
     ) {
         $read = True if $r;
         $write = True if $u;
@@ -198,13 +276,13 @@ my class IO::StdHandle is IO::BufferedOsHandle {
     has uint32 $.id;
 
     proto sub id(*%) {*}
-    multi sub id(:$in!)  { 0 }
-    multi sub id(:$out!) { 1 }
-    multi sub id(:$err!) { 2 }
-    multi sub id(:$w!)   { 1 }
-    multi sub id(:$r?)   { 0 }
+    multi sub id(:$in!, *%)  { 0 }
+    multi sub id(:$out!, *%) { 1 }
+    multi sub id(:$err!, *%) { 2 }
+    multi sub id(:$w!, *%)   { 1 }
+    multi sub id(:$r?, *%)   { 0 }
 
-    submethod BUILD(:$io) {
+    submethod BUILD {
         self.SET: newio_stdhandle($!id = id |%_);
     }
 }
@@ -223,6 +301,27 @@ augment class Str {
 sub open(IO() $_ = IO::Std, *%_) { .open(|%_) }
 
 say open(:err);
-my $fh := 'foo.txt'.IO.open(:r);
-say $fh;
-say $fh.readall.decode.perl;
+say 'foo.txt'.IO.slurp(:enc<latin1>).perl;
+
+my \N = 1000;
+my \FILE = 'test.p6';
+
+do {
+    my $path = Path.new(FILE);
+    my $i = 0;
+    my $start = now;
+    $i += $path.slurp(:enc<latin1>).chars for ^N;
+    my $end = now;
+    say $end - $start;
+    say $i;
+}
+
+do {
+    my $path = IO::Path.new(FILE);
+    my $i = 0;
+    my $start = now;
+    $i += $path.slurp(:enc<latin1>).chars for ^N;
+    my $end = now;
+    say $end - $start;
+    say $i;
+}

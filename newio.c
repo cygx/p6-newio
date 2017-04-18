@@ -9,6 +9,7 @@ EXPORT char *newio_errormsg(int64_t no);
 EXPORT uint64_t newio_stdhandle(uint32_t id);
 EXPORT int64_t newio_close(uint64_t fd);
 EXPORT int64_t newio_size(uint64_t fd);
+EXPORT int64_t newio_getpos(uint64_t fd);
 EXPORT uint64_t newio_open(uint16_t *path,  uint64_t mode);
 EXPORT int64_t newio_validate(uint64_t fd);
 EXPORT int64_t newio_read(
@@ -139,6 +140,15 @@ int64_t newio_size(uint64_t fd)
     LARGE_INTEGER size;
     BOOL ok = GetFileSizeEx(fh, &size);
     return ok ? size.QuadPart : newio_errno();
+}
+
+int64_t newio_getpos(uint64_t fd)
+{
+    HANDLE fh = (HANDLE)(uintptr_t)fd;
+    static const LARGE_INTEGER ZERO;
+    LARGE_INTEGER pos;
+    BOOL ok = SetFilePointerEx(fh, ZERO, &pos, FILE_CURRENT);
+    return ok ? pos.QuadPart : newio_errno();
 }
 
 int64_t newio_validate(uint64_t fd)

@@ -5,6 +5,7 @@ sub newio_errormsg(int64 --> Str) is native<newio.dll> {*}
 sub newio_stdhandle(uint32 --> uint64) is native<newio.dll> {*}
 sub newio_close(uint64 --> int64) is native<newio.dll> {*}
 sub newio_size(uint64 --> int64) is native<newio.dll> {*}
+sub newio_getpos(uint64 --> int64) is native<newio.dll> {*}
 sub newio_open(Str is encoded<utf16>, uint64 --> uint64) is native<newio.dll> {*}
 sub newio_validate(uint64 --> int64) is native<newio.dll> {*}
 sub newio_read(uint64, buf8, uint64, uint64 --> int64) is native<newio.dll> {*}
@@ -13,6 +14,7 @@ sub newio_move(buf8, blob8, uint64, uint64, uint64) is native<newio.dll> {*}
 
 my constant Path = IO::Path;
 my constant NUL = "\0";
+my constant BLOCKSIZE = 512;
 
 my role IO { ... }
 
@@ -56,9 +58,9 @@ my role IO::Handle {
     }
 
     method readall(--> blob8:D) {
-        my $buf := buf8.allocate(
-            self.GET-SIZE - self.GET-POS + self.AVAILABLE-BYTES);
-
+        my $want := self.GET-SIZE - self.GET-POS + self.AVAILABLE-BYTES;
+        my $buf := buf8.allocate($want);
+        self.LOAD-BYTES($want);
         self.CONSUME-BYTES($buf);
     }
 
@@ -106,19 +108,35 @@ my class IO::OsHandle does IO::Handle {
         $size;
     }
 
+    method GET-POS is hidden-from-backtrace {
+        my $pos := newio_getpos($!fd);
+        die X::IO.new(os-error => newio_errormsg($pos))
+            if $pos < 0;
+
+        $pos;
+    }
+
     method CLOSE is hidden-from-backtrace {
         my $rv = newio_close($!fd);
         die X::IO.new(os-error => newio_errormsg($rv))
             if $rv < 0;
     }
+
+    method AVAILABLE-BYTES {
+        0;
+    }
 }
 
-my class IO::BufferedHandle is IO::OsHandle {
-    has $!bytes = buf8.allocate(512);
+my class IO::BufferedOsHandle is IO::OsHandle {
+    has $!bytes = buf8.allocate(BLOCKSIZE);
     has uint $!pos;
 
-    sub round-up(uint $u, uint $m = 512) {
+    sub round-up(uint $u, uint $m = BLOCKSIZE) {
         (($u + $m - 1) div $m) * $m;
+    }
+
+    method AVAILABLE-BYTES {
+        $!pos;
     }
 
     method LOAD-BYTES(uint $n) {
@@ -138,6 +156,7 @@ my class IO::BufferedHandle is IO::OsHandle {
     }
 
     method CONSUME-BYTES($buf) {
+        die 'underflow' if $buf.elems < $!pos;
         my uint $len = $buf.elems;
         my uint $rem = $!pos - $len;
         newio_copy($buf, $!bytes, 0, 0, $len);
@@ -146,7 +165,7 @@ my class IO::BufferedHandle is IO::OsHandle {
     }
 }
 
-my class IO::FileHandle is IO::BufferedHandle {
+my class IO::FileHandle is IO::BufferedOsHandle {
     has $.path;
     has uint64 $.mode;
 
@@ -175,7 +194,7 @@ my class IO::FileHandle is IO::BufferedHandle {
     }
 }
 
-my class IO::StdHandle is IO::BufferedHandle {
+my class IO::StdHandle is IO::BufferedOsHandle {
     has uint32 $.id;
 
     proto sub id(*%) {*}
@@ -205,4 +224,5 @@ sub open(IO() $_ = IO::Std, *%_) { .open(|%_) }
 
 say open(:err);
 my $fh := 'foo.txt'.IO.open(:r);
-say $fh.read(10).decode.perl;
+say $fh;
+say $fh.readall.decode.perl;

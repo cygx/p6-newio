@@ -5,8 +5,14 @@ sub newio_errormsg(int64 --> Str) is native<newio.dll> {*}
 sub newio_stdhandle(uint32 --> uint64) is native<newio.dll> {*}
 sub newio_close(uint64 --> int64) is native<newio.dll> {*}
 sub newio_size(uint64 --> int64) is native<newio.dll> {*}
+sub newio_open(Str is encoded<utf16>, uint64 --> uint64) is native<newio.dll> {*}
+sub newio_validate(uint64 --> int64) is native<newio.dll> {*}
+sub newio_read(uint64, buf8, uint64, uint64 --> int64) is native<newio.dll> {*}
+sub newio_copy(buf8, blob8, uint64, uint64, uint64) is native<newio.dll> {*}
+sub newio_move(buf8, blob8, uint64, uint64, uint64) is native<newio.dll> {*}
 
 my constant Path = IO::Path;
+my constant NUL = "\0";
 
 my role IO { ... }
 
@@ -86,7 +92,11 @@ my role IO[IO::Handle:U \HANDLE] {
 my class IO::OsHandle does IO::Handle {
     has uint64 $.fd;
 
-    method SET($!fd) {}
+    method SET($!fd) is hidden-from-backtrace {
+        my $rv := newio_validate($!fd);
+        die X::IO.new(os-error => newio_errormsg($rv))
+            if $rv < 0;
+    }
 
     method GET-SIZE is hidden-from-backtrace {
         my $size := newio_size($!fd);
@@ -103,24 +113,81 @@ my class IO::OsHandle does IO::Handle {
     }
 }
 
-my class IO::FileHandle is IO::OsHandle {
-    has $.path;
-    submethod BUILD(:io($!path)) {}
-}
+my class IO::BufferedHandle is IO::OsHandle {
+    has $!bytes = buf8.allocate(512);
+    has uint $!pos;
 
-my class IO::StdHandle is IO::OsHandle {
-    has $.id;
-
-    submethod BUILD {
-        self.OPEN(|%_);
+    sub round-up(uint $u, uint $m = 512) {
+        (($u + $m - 1) div $m) * $m;
     }
 
-    proto method OPEN {*}
-    multi method OPEN(:$in!)  { self.SET: newio_stdhandle($!id = 0) }
-    multi method OPEN(:$out!) { self.SET: newio_stdhandle($!id = 1) }
-    multi method OPEN(:$err!) { self.SET: newio_stdhandle($!id = 2) }
-    multi method OPEN(:$w!)   { self.SET: newio_stdhandle($!id = 1) }
-    multi method OPEN(:$r?)   { self.SET: newio_stdhandle($!id = 0) }
+    method LOAD-BYTES(uint $n) {
+        if $n <= $!pos { $n }
+        else {
+            my uint $size = $!bytes.elems;
+            my uint $want = round-up $n;
+            $!bytes.reallocate($want)
+                if $want < $size;
+
+            my int64 $rv = newio_read($.fd, $!bytes, $!pos, $want - $!pos);
+            die X::IO.new(os-error => newio_errormsg($rv))
+                if $rv < 0;
+
+            $!pos += $rv;
+        }
+    }
+
+    method CONSUME-BYTES($buf) {
+        my uint $len = $buf.elems;
+        my uint $rem = $!pos - $len;
+        newio_copy($buf, $!bytes, 0, 0, $len);
+        newio_move($!bytes, $!bytes, 0, $len, $rem) if $rem > 0;
+        $buf;
+    }
+}
+
+my class IO::FileHandle is IO::BufferedHandle {
+    has $.path;
+    has uint64 $.mode;
+
+    sub mode(
+        :$r, :$u, :$w, :$a, :$x, :$ru, :$rw, :$ra, :$rx, 
+        :$read is copy, :$write is copy, :$append is copy,
+        :$create is copy, :$exclusive is copy, :$truncate is copy
+    ) {
+        $read = True if $r;
+        $write = True if $u;
+        $write = $create = $truncate = True if $w;
+        $write = $create = $append = True if $a;
+        $write = $create = $exclusive = True if $x;
+        $read = $write = True if $ru;
+        $read = $write = $create = $truncate = True if $rw;
+        $read = $write = $create = $append = True if $ra;
+        $read = $write = $create = $exclusive = True if $rx;
+        ?$read +| ?$write +< 1 +| ?$append +< 2
+            +| ?$create +< 3 +| ?$exclusive +< 4 +| ?$truncate +< 5;
+    }
+
+    submethod BUILD(:$io) {
+        $!path = $io.absolute;
+        $!mode = mode |%_;
+        self.SET: newio_open($!path ~ NUL, $!mode);
+    }
+}
+
+my class IO::StdHandle is IO::BufferedHandle {
+    has uint32 $.id;
+
+    proto sub id(*%) {*}
+    multi sub id(:$in!)  { 0 }
+    multi sub id(:$out!) { 1 }
+    multi sub id(:$err!) { 2 }
+    multi sub id(:$w!)   { 1 }
+    multi sub id(:$r?)   { 0 }
+
+    submethod BUILD(:$io) {
+        self.SET: newio_stdhandle($!id = id |%_);
+    }
 }
 
 my class IO::Std does IO[IO::StdHandle] {}
@@ -131,12 +198,11 @@ my class IO::Path is Path does IO[IO::FileHandle] {
 }
 
 augment class Str {
-    proto method IO {*}
-    multi method IO('-':) { IO::Std }
-    multi method IO { IO::Path.new(self) }
+    method IO { IO::Path.new(self) }
 }
 
-sub open(IO() $_, *%_) { .open(|%_) }
+sub open(IO() $_ = IO::Std, *%_) { .open(|%_) }
 
-say '-'.IO.open(:err);
-say 'foo.txt'.IO.open
+say open(:err);
+my $fh := 'foo.txt'.IO.open(:r);
+say $fh.read(10).decode.perl;

@@ -2,17 +2,17 @@ use NativeCall;
 use MONKEY-TYPING;
 use nqp;
 
-sub newio_errormsg(int64 --> Str) is native<newio.dll> {*}
-sub newio_stdhandle(uint32 --> uint64) is native<newio.dll> {*}
-sub newio_close(uint64 --> int64) is native<newio.dll> {*}
-sub newio_size(uint64 --> int64) is native<newio.dll> {*}
-sub newio_getpos(uint64 --> int64) is native<newio.dll> {*}
-sub newio_open(Str is encoded<utf16>, uint64 --> uint64) is native<newio.dll> {*}
-sub newio_validate(uint64 --> int64) is native<newio.dll> {*}
-sub newio_read(uint64, buf8, uint64, uint64 --> int64) is native<newio.dll> {*}
-sub newio_copy(buf8, blob8, uint64, uint64, uint64) is native<newio.dll> {*}
-sub newio_move(buf8, blob8, uint64, uint64, uint64) is native<newio.dll> {*}
-sub newio_decode_latin1(Uni, blob8, int64 --> int64) is native<newio.dll> {*}
+sub newio_errormsg(int64 --> Str) is native<newio> {*}
+sub newio_stdhandle(uint32 --> uint64) is native<newio> {*}
+sub newio_close(uint64 --> int64) is native<newio> {*}
+sub newio_size(uint64 --> int64) is native<newio> {*}
+sub newio_getpos(uint64 --> int64) is native<newio> {*}
+sub newio_open(Str is encoded<utf16>, uint64 --> uint64) is native<newio> {*}
+sub newio_validate(uint64 --> int64) is native<newio> {*}
+sub newio_read(uint64, buf8, uint64, uint64 --> int64) is native<newio> {*}
+sub newio_copy(buf8, blob8, uint64, uint64, uint64) is native<newio> {*}
+sub newio_move(buf8, blob8, uint64, uint64, uint64) is native<newio> {*}
+sub newio_decode_latin1(Uni, blob8, int64 --> int64) is native<newio> {*}
 
 my constant Path = IO::Path;
 my constant NUL = "\0";
